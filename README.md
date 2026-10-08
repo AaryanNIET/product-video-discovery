@@ -36,6 +36,7 @@ Other commands (in `backend/`): `npm test` (51 unit tests) · `npm run evaluate`
 
 ## MVP architecture
 
+
 ```mermaid
 flowchart TD
     UI["React dashboard<br/>search · live progress · results · shortlist"]
@@ -57,7 +58,7 @@ flowchart TD
     B2 --> DB
     API -. "live progress (SSE)" .-> UI
 ```
-
+![MVP architecture](<MVP architecture.png>)
 ```
 backend/src/
   services/product/      product page → title, description, image (Shopify, JSON-LD, Amazon, Open Graph)
@@ -68,6 +69,7 @@ backend/src/
   utils/                 safe URL fetching, retries, rate limiting
 frontend/src/            React dashboard (components/, pages/Dashboard.tsx)
 ```
+![Diagram](Diagram.png)
 
 ---
 
@@ -114,6 +116,36 @@ frontend/src/            React dashboard (components/, pages/Dashboard.tsx)
 **Uniqueness** (mock data, 3 identical searches in a row): 0 videos repeated between searches, 0 duplicates inside any result set.
 
 **5-product evaluation: not run yet.** It needs about $4-7 of Apify credit and more Gemini calls than the free tier allows in one day. The script is ready (`npm run evaluate` writes `docs/test-results.md`). I chose to save the remaining credit for the demo video.
+
+---
+
+## Cost per search
+
+Apify charges **per video scraped**. These are the prices we were billed on the Free plan:
+
+| Source | Price per item | One round (40 items) |
+|---|---|---|
+| Instagram Reels | $0.0026 | ~$0.10 |
+| Meta Ad Library | $0.0058 | ~$0.23 |
+| TikTok (optional) | $0.0037 | ~$0.15 |
+
+A search runs 1-3 rounds per source, depending on how quickly it finds 20 verified videos.
+
+**What real searches cost:**
+
+| Search | Instagram | Meta | TikTok | Total |
+|---|---|---|---|---|
+| First live search, *before* the cost fixes | 100 items · $0.26 | 213 items · $1.39 (176 were duplicates) | off | **~$1.65** |
+| Live search, *after* the fixes | 76 items · $0.20 | 124 items · $0.72 | 42 items · $0.16 | **~$1.10** |
+| Expected range (Instagram + Meta, TikTok off) | $0.10-0.30 | $0.23-0.70 | - | **~$0.35-1.00** |
+
+**What we learned:**
+- **Meta is the expensive source.** It's about two-thirds of the cost: ads cost twice as much per item, and the same ad often appears under many IDs.
+- **Strict matching costs more.** Rejecting other colourways and editions means more rounds to reach 20 verified videos.
+- **Apify's free $5/month covers about 5 searches.** Real use needs a paid plan.
+- **Gemini:** a search uses about 15-25 calls (1 photo analysis, plus 1 call per 8 thumbnails). The free tier allows ~20 calls per day per model, so with the 4-model fallback that's only a few searches a day. We didn't measure paid Gemini costs because we stayed on the free tier.
+
+**How the app keeps costs down:** a fixed budget per round (`RESULTS_PER_ROUND`), no scraping when the brain is down, stopping when a round brings in fewer than 5 new videos, cached product analysis, and an estimated cost shown for each source in the dashboard.
 
 ---
 
