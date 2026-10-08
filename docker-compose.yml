@@ -1,25 +1,37 @@
-# Convenience only (bonus: one-command local run). Requires server/.env and
-# client/.env to be created from their .env.example files first.
-version: "3.8"
+# One command: `docker compose up --build`, then open http://localhost:8080
+# Keys are read from backend/.env (copy backend/.env.example first). Without it
+# the stack still starts, and the dashboard explains which keys are missing.
 services:
   mongo:
     image: mongo:7
-    ports: ["27017:27017"]
     volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
-  server:
-    build: ./server
-    env_file: ./server/.env
+  backend:
+    build: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
     environment:
-      - MONGODB_URI=mongodb://mongo:27017/product-video-discovery
+      # Overrides for the container network (take precedence over backend/.env)
+      MONGODB_URI: mongodb://mongo:27017/product-video-discovery
+      CLIENT_ORIGIN: http://localhost:8080
+      PORT: "4000"
+    volumes: ["media-cache:/app/storage"]
+    depends_on:
+      mongo:
+        condition: service_healthy
     ports: ["4000:4000"]
-    depends_on: [mongo]
 
-  client:
-    build: ./client
-    env_file: ./client/.env
-    ports: ["5173:5173"]
-    depends_on: [server]
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports: ["8080:80"]
 
 volumes:
   mongo-data:
+  media-cache:
