@@ -1,0 +1,25 @@
+# Convenience only (bonus: one-command local run). Requires server/.env and
+# client/.env to be created from their .env.example files first.
+version: "3.8"
+services:
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    volumes: ["mongo-data:/data/db"]
+
+  server:
+    build: ./server
+    env_file: ./server/.env
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017/product-video-discovery
+    ports: ["4000:4000"]
+    depends_on: [mongo]
+
+  client:
+    build: ./client
+    env_file: ./client/.env
+    ports: ["5173:5173"]
+    depends_on: [server]
+
+volumes:
+  mongo-data:
