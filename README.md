@@ -36,29 +36,17 @@ Other commands (in `backend/`): `npm test` (51 unit tests) · `npm run evaluate`
 
 ## MVP architecture
 
+How one search flows through the system:
 
-```mermaid
-flowchart TD
-    UI["React dashboard<br/>search · live progress · results · shortlist"]
-    API["Express API<br/>validation · rate limit · SSE"]
-    Q["Job queue<br/>(in-process, 2 at a time)"]
-    R["Product resolver<br/>page → title, description, image"]
-    B1["Brain step 1: analyse photo<br/>attributes + search terms"]
-    IG["Instagram Reels<br/>(Apify)"]
-    MT["Meta Ad Library<br/>(Apify)"]
-    TT["TikTok, optional<br/>(Apify)"]
-    D["De-duplicate<br/>+ skip previously seen"]
-    B2["Brain step 2: score thumbnails<br/>0-100 + reason"]
-    DB[("MongoDB<br/>history · seen videos · cache · shortlist")]
+![MVP architecture: React dashboard → Express API → job queue → product resolver → image brain → Instagram, Meta and TikTok scrapers in parallel → de-duplication → match scoring → MongoDB](Architecture.png)
 
-    UI -- "POST /api/search" --> API --> Q --> R --> B1
-    B1 --> IG & MT & TT
-    IG & MT & TT --> D --> B2
-    B2 -- "fewer than 20? next round,<br/>wider terms" --> IG
-    B2 --> DB
-    API -. "live progress (SSE)" .-> UI
-```
-![MVP architecture](<MVP architecture.png>)
+How the code is organised:
+
+![Code structure: backend services (product, brain, providers, dedupe, pipeline, utils) and the React frontend](Diagram.png)
+
+<details>
+<summary>Folder layout</summary>
+
 ```
 backend/src/
   services/product/      product page → title, description, image (Shopify, JSON-LD, Amazon, Open Graph)
@@ -69,7 +57,8 @@ backend/src/
   utils/                 safe URL fetching, retries, rate limiting
 frontend/src/            React dashboard (components/, pages/Dashboard.tsx)
 ```
-![Diagram](Diagram.png)
+
+</details>
 
 ---
 
