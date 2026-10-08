@@ -1,132 +1,201 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import SearchBar from "../components/SearchBar";
-import ProgressSteps from "../components/ProgressSteps";
-import ProductCard from "../components/ProductCard";
-import ResultsSection from "../components/ResultsSection";
+import ProgressPanel from "../components/ProgressPanel";
+import ProductPanel from "../components/ProductPanel";
+import ResultsPanel from "../components/ResultsPanel";
 import HistoryPanel from "../components/HistoryPanel";
-import { startDiscovery, getDiscoveryStatus, getHistory } from "../services/api";
-import { JobStatusResponse, HistoryItem } from "../types";
+import ShortlistPanel from "../components/ShortlistPanel";
+import ScoreLegend from "../components/ScoreLegend";
+import { addToShortlist, errorMessage, getHealth, getHistory, getSearch, getShortlist, removeFromShortlist, startSearch, watchSearch } from "../services/api";
+import { Health, HistoryItem, SearchJob, ShortlistItem, VideoCandidate } from "../types";
 
-const POLL_INTERVAL_MS = 1500;
-const POLL_TIMEOUT_MS = 90_000;
+type SearchBody = { input: string; imageDataUrl?: string; includeTikTok: boolean };
 
 export default function Dashboard() {
-  const [job, setJob] = useState<JobStatusResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [job, setJob] = useState<SearchJob | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startTimeRef = useRef<number>(0);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [shortlist, setShortlist] = useState<ShortlistItem[]>([]);
+  const [showShortlist, setShowShortlist] = useState(false);
+  const stopWatching = useRef<() => void>();
+  const lastBody = useRef<SearchBody | null>(null);
 
-  const refreshHistory = useCallback(() => {
-    getHistory()
-      .then((r) => setHistory(r.history))
-      .catch(() => {});
-  }, []);
+  const refreshHistory = useCallback(() => getHistory().then(setHistory).catch(() => {}), []);
+  const refreshShortlist = useCallback(() => getShortlist().then(setShortlist).catch(() => {}), []);
 
   useEffect(() => {
+    getHealth().then(setHealth).catch(() => setError("Cannot reach the backend. Start it with `npm run dev` in backend/."));
     refreshHistory();
-  }, [refreshHistory]);
+    refreshShortlist();
+    return () => stopWatching.current?.();
+  }, [refreshHistory, refreshShortlist]);
 
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
-
-  const runSearch = useCallback(
-    async (input: string) => {
-      setError(null);
-      setLoading(true);
-      setJob(null);
-      if (pollRef.current) clearInterval(pollRef.current);
-
-      try {
-        const { jobId } = await startDiscovery(input);
-        startTimeRef.current = Date.now();
-
-        pollRef.current = setInterval(async () => {
-          try {
-            const status = await getDiscoveryStatus(jobId);
-            setJob(status);
-
-            const finished = ["completed", "partial_success", "failed"].includes(status.status);
-            const timedOut = Date.now() - startTimeRef.current > POLL_TIMEOUT_MS;
-
-            if (finished || timedOut) {
-              if (pollRef.current) clearInterval(pollRef.current);
-              setLoading(false);
-              if (status.status === "failed") setError("Discovery failed. Check pipeline progress for details.");
-              refreshHistory();
-            }
-          } catch {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setLoading(false);
-            setError("Lost connection while polling for results.");
+  const follow = useCallback(
+    (jobId: string) => {
+      stopWatching.current?.();
+      stopWatching.current = watchSearch(
+        jobId,
+        (j) => {
+          setJob(j);
+          const done = ["completed", "partial", "failed"].includes(j.status);
+          setBusy(!done);
+          if (done) {
+            if (j.status === "failed") setError(j.error || "The search failed. See the pipeline panel for details.");
+            refreshHistory();
           }
-        }, POLL_INTERVAL_MS);
-      } catch (err: any) {
-        setLoading(false);
-        setError(err?.response?.data?.message || err?.response?.data?.error || "Could not start discovery. Is the backend running?");
-      }
+        },
+        (msg) => {
+          setBusy(false);
+          setError(msg);
+        }
+      );
     },
     [refreshHistory]
   );
 
-  const results = job?.results;
+  const runSearch = useCallback(
+    async (body: SearchBody) => {
+      setError(null);
+      setBusy(true);
+      setJob(null);
+      lastBody.current = body;
+      try {
+        const jobId = await startSearch(body);
+        follow(jobId);
+        refreshHistory();
+      } catch (err) {
+        setBusy(false);
+        setError(errorMessage(err, "Could not start the search."));
+      }
+    },
+    [follow, refreshHistory]
+  );
+
+  const openSearch = useCallback(
+    async (jobId: string) => {
+      setError(null);
+      try {
+        const j = await getSearch(jobId);
+        setJob(j);
+        if (!["completed", "partial", "failed"].includes(j.status)) {
+          setBusy(true);
+          follow(jobId);
+        }
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch (err) {
+        setError(errorMessage(err, "Could not open that search."));
+      }
+    },
+    [follow]
+  );
+
+  const shortlistKeys = new Set(shortlist.map((s) => s.key));
+  const toggleShortlist = async (v: VideoCandidate) => {
+    try {
+      if (shortlistKeys.has(v.key)) await removeFromShortlist(v.key);
+      else await addToShortlist(v, job?.product?.title, job?.jobId);
+      refreshShortlist();
+    } catch (err) {
+      setError(errorMessage(err, "Could not update the shortlist."));
+    }
+  };
+
+  const setupWarnings = health
+    ? [
+        health.providerMode === "mock" && "Mock mode: videos are generated sample data, not real Instagram/Meta results (PROVIDER_MODE=mock).",
+        health.scraper.startsWith("missing") && "APIFY_TOKEN is missing in backend/.env, so Instagram, Meta and TikTok searches will fail.",
+        health.vision.startsWith("missing") && "GEMINI_API_KEY is missing in backend/.env: match scores use captions only and cannot verify the exact product.",
+        health.database.startsWith("unavailable") && "MongoDB is not connected: history, the seen-video index and the shortlist reset when the server restarts.",
+      ].filter(Boolean)
+    : [];
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="max-w-6xl mx-auto px-6 py-5">
-          <h1 className="text-xl font-bold text-slate-900">Product Video Discovery Dashboard</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Find Instagram Reels and Meta Ad Library ads that show your exact product.
-          </p>
+      <header className="border-b border-slate-200 bg-white sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold text-slate-900 truncate">Product Video Discovery</h1>
+            <p className="text-xs text-slate-500 hidden sm:block">Instagram Reels and Meta Ad Library videos that show your exact product</p>
+          </div>
+          <button onClick={() => setShowShortlist(true)} className="shrink-0 text-sm rounded-lg border border-slate-300 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+            ★ Shortlist <span className="text-slate-400">({shortlist.length})</span>
+          </button>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 py-6 flex flex-col gap-6">
-        <SearchBar onSearch={runSearch} loading={loading} />
-
-        {error && <div className="bg-red-50 text-red-700 text-sm rounded-lg px-4 py-3">{error}</div>}
-
-        {(loading || job) && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-1 flex flex-col gap-6">
-              {results?.product && <ProductCard product={results.product} />}
-              {job && <ProgressSteps steps={job.progress} />}
-              <HistoryPanel items={history} onSelect={runSearch} />
-            </div>
-
-            <div className="lg:col-span-2 flex flex-col gap-6">
-              <ResultsSection
-                title="Instagram Reels"
-                minimum={20}
-                result={results?.instagram ?? null}
-                loading={loading}
-                onRetry={() => results && runSearch(results.product.productName)}
-              />
-              <ResultsSection
-                title="Meta Ad Library"
-                minimum={20}
-                result={results?.metaAds ?? null}
-                loading={loading}
-                onRetry={() => results && runSearch(results.product.productName)}
-              />
-            </div>
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-5">
+        {setupWarnings.length > 0 && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 text-sm rounded-xl px-4 py-3">
+            <ul className="list-disc pl-4 space-y-0.5">
+              {setupWarnings.map((w) => (
+                <li key={String(w)}>{w}</li>
+              ))}
+            </ul>
           </div>
         )}
 
-        {!loading && !job && (
-          <div className="flex flex-col gap-6">
-            <div className="bg-white border border-dashed border-slate-300 rounded-xl p-10 text-center text-slate-400 text-sm">
-              Enter a product name or URL above to start a discovery search.
-            </div>
-            <HistoryPanel items={history} onSelect={runSearch} />
+        <SearchBar onSearch={runSearch} busy={busy} tiktokAvailable={health?.tiktokAvailable ?? true} />
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-800 text-sm rounded-xl px-4 py-3 flex items-start justify-between gap-3" role="alert">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} className="text-red-400 hover:text-red-700" aria-label="Dismiss">
+              ✕
+            </button>
           </div>
         )}
+
+        {/* Narrow screens: product + progress, then results, then legend + history. Wide: two columns. */}
+        <div className="grid grid-cols-1 lg:grid-cols-[22rem_1fr] gap-5 items-start">
+          {/* "contents" lets the two sidebar groups sit around the results on narrow screens */}
+          <div className="contents lg:flex lg:flex-col lg:gap-5">
+            {job && (
+              <aside className="order-1 flex flex-col gap-5">
+                {job.product && <ProductPanel product={job.product} />}
+                <ProgressPanel job={job} />
+              </aside>
+            )}
+            <aside className="order-3 flex flex-col gap-5">
+              <ScoreLegend threshold={job?.matchThreshold ?? health?.matchThreshold ?? 65} />
+              <HistoryPanel items={history} activeJobId={job?.jobId} onOpen={openSearch} onRerun={(h) => runSearch({ input: h.input, includeTikTok: false })} />
+            </aside>
+          </div>
+
+          <div className={`min-w-0 ${job ? "order-2" : "order-first"} lg:order-none`}>
+            {job ? (
+              job.status === "failed" && !Object.values(job.sources).some((s) => s?.accepted.length) && !job.product ? (
+                <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
+                  <p className="font-medium text-slate-700">This search could not run.</p>
+                  <p className="text-sm text-slate-500 mt-1">{job.error}</p>
+                  <p className="text-sm text-slate-500 mt-3">Try another link, paste the product name instead, or upload a product photo.</p>
+                </div>
+              ) : (
+                <ResultsPanel job={job} shortlistKeys={shortlistKeys} onToggleShortlist={toggleShortlist} onOpenSearch={openSearch} onRetry={() => lastBody.current && runSearch(lastBody.current)} />
+              )
+            ) : (
+              <div className="bg-white border border-dashed border-slate-300 rounded-xl p-10 text-center text-slate-500">
+                <p className="font-medium text-slate-700">Search by product name, product link or photo.</p>
+                <p className="text-sm mt-2 max-w-xl mx-auto">
+                  The image brain reads the product photo, builds search terms for each platform, collects at least {health?.minimumPerSource ?? 20} Instagram Reels and {health?.minimumPerSource ?? 20} Meta Ad Library videos, and scores every video 0-100 for how exactly it shows your product. Each new search skips videos you have already seen.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
       </main>
+
+      {showShortlist && (
+        <ShortlistPanel
+          items={shortlist}
+          onClose={() => setShowShortlist(false)}
+          onRemove={async (key) => {
+            await removeFromShortlist(key).catch(() => {});
+            refreshShortlist();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -187,7 +187,7 @@ export function textFallbackScore(candidate: VideoCandidate, identity: ProductId
   return {
     score,
     verdict: verdictForScore(score),
-    reason: `${why}: estimated from caption text only (${rel}% keyword overlap)`,
+    reason: `${why}. Caption keyword overlap ${rel}%, not visually verified`,
     matched: rel > 30 ? ["caption keywords"] : [],
     mismatched: rel > 30 ? [] : ["caption does not mention the product"],
     method: "text-fallback",

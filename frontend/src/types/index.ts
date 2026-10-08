@@ -1,75 +1,133 @@
-export interface ProductIdentity {
+export type Platform = "instagram" | "meta_ads" | "tiktok";
+
+export interface ProductAttributes {
+  productType: string;
   brand: string;
-  productName: string;
-  modelNumber: string;
-  sku: string;
-  category: string;
-  color: string;
-  imageUrl: string | null;
-  visualFeatures: string[];
-  searchQueries: string[];
-  negativeTerms: string[];
+  colours: string[];
+  printsOrGraphics: string[];
+  logos: string[];
+  textOnProduct: string[];
+  material: string;
+  shape: string;
+  distinctiveFeatures: string[];
+  summary: string;
 }
 
-export interface VerificationResult {
-  sameProduct: boolean;
-  confidence: number;
-  brandMatch: boolean;
-  modelMatch: boolean;
-  visualMatch: number;
-  evidence: string[];
+export interface ProductIdentity {
+  title: string;
+  description: string;
+  sourceType: "name" | "url" | "image";
+  sourceUrl: string | null;
+  imageSource: "page" | "upload" | null;
+  imageId: string | null;
+  imageUrl: string | null;
+  attributes: ProductAttributes;
+  searchPlan: { instagramHashtags: string[]; metaKeywords: string[]; tiktokKeywords: string[] };
+  analysisMode: "vision" | "text" | "heuristic";
+}
+
+export type MatchVerdict = "exact" | "very_close" | "same_category" | "different" | "unclear";
+
+export interface MatchResult {
+  score: number;
+  verdict: MatchVerdict;
+  reason: string;
+  matched: string[];
+  mismatched: string[];
+  method: "vision" | "text-fallback";
 }
 
 export interface VideoCandidate {
-  id: string;
+  key: string;
+  platform: Platform;
   externalId: string;
-  platform: "instagram" | "meta_ads";
   url: string;
-  thumbnailUrl?: string;
-  title?: string;
+  thumbId?: string;
+  videoUrl?: string;
   caption?: string;
   creator?: string;
+  postedAt?: string;
+  engagement?: number;
   sourceQuery: string;
-  textScore?: number;
-  visualScore?: number;
-  metadataScore?: number;
-  finalScore?: number;
-  verification?: VerificationResult;
+  match?: MatchResult;
+  previouslySeen?: { jobId: string; at: string };
 }
 
-export interface SourceResult {
-  candidates: VideoCandidate[];
-  status: "ok" | "partial" | "failed";
-  error?: string | null;
-  shortfallReason?: string | null;
-}
-
-export interface DiscoveryResults {
-  product: ProductIdentity;
-  instagram: SourceResult;
-  metaAds: SourceResult;
+export interface SourceSummary {
+  platform: Platform;
+  enabled: boolean;
+  status: "pending" | "running" | "ok" | "partial" | "failed" | "disabled";
+  accepted: VideoCandidate[];
+  belowThreshold: VideoCandidate[];
+  previouslySeen: VideoCandidate[];
+  stats: { fetched: number; duplicates: number; previouslySeen: number; scored: number; rounds: number };
+  queriesUsed: string[];
+  error?: string;
+  shortfall?: string;
 }
 
 export interface ProgressStep {
   step: string;
-  status: "pending" | "active" | "done" | "error";
+  status: "pending" | "active" | "done" | "error" | "skipped";
   detail?: string;
   at: string;
 }
 
-export interface JobStatusResponse {
+export type JobStatus = "queued" | "running" | "completed" | "partial" | "failed";
+
+export interface SearchJob {
   jobId: string;
-  status: "pending" | "processing" | "partial_success" | "completed" | "failed";
+  input: string;
+  hasUpload: boolean;
+  includeTikTok: boolean;
+  status: JobStatus;
   progress: ProgressStep[];
-  results: DiscoveryResults | null;
+  product: ProductIdentity | null;
+  sources: Partial<Record<Platform, SourceSummary>>;
+  error?: string;
+  createdAt: string;
+  minimumPerSource: number;
+  matchThreshold: number;
 }
 
 export interface HistoryItem {
   jobId: string;
-  status: string;
-  productName?: string;
-  sourceInput?: string;
-  instagramCount: number;
-  metaAdsCount: number;
+  input: string;
+  hasUpload: boolean;
+  status: JobStatus;
+  title: string;
+  imageId: string | null;
+  counts: Partial<Record<Platform, number>>;
   createdAt: string;
 }
+
+export interface ShortlistItem {
+  key: string;
+  platform: Platform;
+  url: string;
+  thumbId?: string;
+  caption?: string;
+  creator?: string;
+  score?: number;
+  reason?: string;
+  productTitle?: string;
+  jobId?: string;
+  createdAt: string;
+}
+
+export interface Health {
+  ok: boolean;
+  providerMode: "live" | "mock";
+  database: string;
+  scraper: string;
+  vision: string;
+  tiktokAvailable: boolean;
+  matchThreshold: number;
+  minimumPerSource: number;
+}
+
+export const PLATFORM_LABEL: Record<Platform, string> = {
+  instagram: "Instagram Reels",
+  meta_ads: "Meta Ad Library",
+  tiktok: "TikTok",
+};

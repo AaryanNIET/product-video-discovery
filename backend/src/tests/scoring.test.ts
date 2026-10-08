@@ -63,7 +63,7 @@ describe("text relevance and fallback", () => {
     expect(r.method).toBe("text-fallback");
     expect(r.score).toBeLessThanOrEqual(75);
     expect(r.verdict).not.toBe("exact");
-    expect(r.reason).toMatch(/caption text only/);
+    expect(r.reason).toMatch(/not visually verified/);
   });
 });
 
