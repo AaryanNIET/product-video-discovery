@@ -368,7 +368,7 @@ Being upfront about what this does *not* do:
 - **Scraper output can change.** Apify actors occasionally rename fields. Field reading is defensive and actor IDs are configurable, but a large change could need an update in one provider file.
 - **Costs and quotas.** Apify charges per result (the free plan's monthly credit covers a modest number of searches), and the Gemini free tier has per-minute limits that can slow a large search. Both are configurable.
 - **Single-instance job queue.** The queue runs inside the backend process, so a restart loses in-flight searches (finished ones are saved). See next steps.
-- **Docker setup not tested on the development machine** (Docker wasn't installed there). Both production builds (`npm run build`) were verified directly.
+- **Free-tier quotas are small.** The Gemini free tier allows about 20 requests per day per model; the brain automatically falls back through `GEMINI_FALLBACK_MODELS` when one runs out, but sustained use needs billing enabled in Google AI Studio.
 
 ---
 
