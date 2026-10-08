@@ -4,6 +4,7 @@ import { logger } from "../../utils/logger";
 import { mapLimit } from "../../utils/concurrency";
 import { resolveProduct } from "../product/productResolver";
 import { scoreCandidates, textRelevance } from "../brain/matchScorer";
+import { isGeminiConfigured } from "../brain/gemini";
 import { dedupeCandidates } from "../dedupe/dedupe";
 import { seenStore } from "../dedupe/seenStore";
 import { cacheThumbnail, sha1 } from "../media/imageStore";
@@ -20,8 +21,8 @@ const providers: Record<Platform, VideoProvider> = {
 };
 
 const REQUIRED: Platform[] = ["instagram", "meta_ads"];
-/** Raw items requested per round; generous because dedupe + scoring discard many. */
-const RAW_PER_ROUND = 60;
+/** Apify Free-plan price per scraped item (USD), used for the cost estimate shown per source. */
+const PRICE_PER_ITEM_USD: Record<Platform, number> = { instagram: 0.0026, meta_ads: 0.0058, tiktok: 0.0037 };
 /** Previously-seen videos kept per source for the "Show previously seen" toggle. */
 const MAX_PREVIOUSLY_SEEN = 40;
 
@@ -33,7 +34,7 @@ function emptySummary(platform: Platform, enabled: boolean): SourceSummary {
     accepted: [],
     belowThreshold: [],
     previouslySeen: [],
-    stats: { fetched: 0, duplicates: 0, previouslySeen: 0, scored: 0, rounds: 0 },
+    stats: { fetched: 0, duplicates: 0, previouslySeen: 0, scored: 0, rounds: 0, estCostUsd: 0 },
     queriesUsed: [],
   };
 }
@@ -67,6 +68,10 @@ export async function runSearch(job: Job, upload: Buffer | null): Promise<void> 
     reference = resolved.reference;
     job.product = identity;
     emit(job);
+    // Scraping costs money: never collect videos the brain cannot verify.
+    if (resolved.brainError) {
+      return finishJob(job, "failed", `The image brain (Gemini) is unavailable, so the search stopped before scraping and no scraper credit was spent. Details: ${resolved.brainError}`);
+    }
   } catch (err) {
     const msg = (err as Error).message;
     const failedStep = job.progress.find((p) => p.status === "active")?.step || "fetch_page";
@@ -100,6 +105,7 @@ async function collectSource(job: Job, platform: Platform, identity: ProductIden
   const min = env.matching.perSourceMinimum;
   const processed: VideoCandidate[] = []; // everything already handled in this search (for in-search dedupe)
   const plan = { ...identity.searchPlan, instagramHashtags: [...identity.searchPlan.instagramHashtags] };
+  const timesUsed = new Map<string, number>(); // reused terms paginate deeper
   summary.status = "running";
 
   for (let round = 0; round < env.matching.maxRounds; round++) {
@@ -116,9 +122,13 @@ async function collectSource(job: Job, platform: Platform, identity: ProductIden
     // Scrape.
     let fetched: VideoCandidate[];
     try {
-      const batch = await provider.search(terms, { round, limit: RAW_PER_ROUND });
+      terms.forEach((t) => timesUsed.set(t, (timesUsed.get(t) || 0) + 1));
+      const depth = Math.max(...terms.map((t) => timesUsed.get(t)!));
+      const batch = await provider.search(terms, { round, limit: env.matching.resultsPerRound, depth });
       fetched = batch.candidates;
       summary.stats.fetched += fetched.length;
+      const billed = env.providerMode === "live" ? fetched.length + batch.skipped : 0;
+      summary.stats.estCostUsd = Math.round((summary.stats.estCostUsd + billed * PRICE_PER_ITEM_USD[platform]) * 1000) / 1000;
     } catch (err) {
       const msg = (err as Error).message;
       logger.warn("Source round failed", { platform, round, error: msg });
@@ -186,6 +196,7 @@ async function collectSource(job: Job, platform: Platform, identity: ProductIden
       if ((c.match?.score ?? 0) >= env.matching.threshold) summary.accepted.push(c);
       else summary.belowThreshold.push(c);
     }
+    const visionDown = isGeminiConfigured() && unique.length > 0 && unique.every((c) => c.match?.method === "text-fallback");
     summary.accepted = rankAccepted(summary.accepted);
     summary.belowThreshold = rankAccepted(summary.belowThreshold).slice(0, 60);
 
@@ -194,6 +205,12 @@ async function collectSource(job: Job, platform: Platform, identity: ProductIden
 
     if (summary.accepted.length >= min) break;
     if (summary.stats.scored >= env.matching.maxVisionPerSource) break;
+    if (visionDown) {
+      summary.error = "The image brain (Gemini) stopped responding, so further search rounds were skipped to avoid spending scraper credit on unverified videos.";
+      break;
+    }
+    // Diminishing returns: a later round that brings fewer than 5 new videos is not worth paying for again.
+    if (round > 0 && fresh.length < 5) break;
     if (platform === "instagram") addRelatedHashtags(plan, summary.accepted, round);
   }
 

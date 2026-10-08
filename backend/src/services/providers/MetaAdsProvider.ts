@@ -3,7 +3,7 @@ import { ProviderBatch, VideoCandidate } from "../../types";
 import { termsForRound } from "../brain/productAnalysis";
 import { pick, runActor, toIso } from "./apifyClient";
 import { mockCandidates } from "./mockData";
-import { ProviderSearchOptions, VideoProvider } from "./VideoProvider";
+import { perTermLimit, ProviderSearchOptions, VideoProvider } from "./VideoProvider";
 
 /** Public Ad Library search URL for video ads matching a keyword, across all countries and ad types. */
 export function adLibrarySearchUrl(term: string, country = env.apify.adLibraryCountry): string {
@@ -39,7 +39,7 @@ export class MetaAdsProvider implements VideoProvider {
 
     const items = await runActor(env.apify.metaAdsActor, {
       startUrls: terms.map((t) => ({ url: adLibrarySearchUrl(t) })),
-      resultsLimit: Math.min(200, opts.limit * (opts.round + 1)),
+      resultsLimit: perTermLimit(opts, terms), // applies per start URL, not per run
       isDetailsPerAd: false,
     });
 

@@ -5,6 +5,7 @@ import { env } from "./config/env";
 import routes from "./routes";
 import { isDbReady } from "./db/connection";
 import { logger } from "./utils/logger";
+import { activeGeminiModel } from "./services/brain/gemini";
 
 export const app = express();
 
@@ -19,7 +20,7 @@ app.get("/api/health", (_req, res) =>
     providerMode: env.providerMode,
     database: isDbReady() ? "connected" : "unavailable (in-memory)",
     scraper: env.providerMode === "mock" ? "mock data" : env.apify.token ? "apify" : "missing APIFY_TOKEN",
-    vision: env.gemini.apiKey ? `gemini (${env.gemini.model})` : "missing GEMINI_API_KEY (caption-only fallback)",
+    vision: env.gemini.apiKey ? (activeGeminiModel() ? `gemini (${activeGeminiModel()})` : "gemini (all models out of quota)") : "missing GEMINI_API_KEY (caption-only fallback)",
     tiktokAvailable: env.tiktok.enabled,
     matchThreshold: env.matching.threshold,
     minimumPerSource: env.matching.perSourceMinimum,

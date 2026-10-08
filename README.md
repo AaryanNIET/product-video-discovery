@@ -138,7 +138,7 @@ The pipeline never fails silently:
 
 ## 4. The image-analysis brain
 
-**Model: Google Gemini 2.5 Flash** (configurable with `GEMINI_MODEL`).
+**Model: Google Gemini 3.8 Flash** (configurable with `GEMINI_MODEL`).
 
 **Why Gemini:**
 - **Accurate on fine detail.** It reliably reads logos and small on-product text, and tells colourways and prints apart, which is exactly what separates "this product" from "the same category".
@@ -393,7 +393,7 @@ All settings live in `backend/.env`. See [`backend/.env.example`](backend/.env.e
 | `PROVIDER_MODE` | `live` | `live` = Apify scraping, `mock` = generated data |
 | `APIFY_TOKEN` | – | Required for live mode |
 | `GEMINI_API_KEY` | – | Required for visual matching |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Vision model |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Vision model |
 | `MATCH_THRESHOLD` | `65` | Minimum score to count as verified |
 | `PER_SOURCE_MINIMUM` | `20` | Target per required source |
 | `MAX_SEARCH_ROUNDS` | `3` | Refill rounds per source |

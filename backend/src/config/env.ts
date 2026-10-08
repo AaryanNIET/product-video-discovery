@@ -35,11 +35,13 @@ export const env = {
 
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || "",
-    model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    model: process.env.GEMINI_MODEL || "gemini-3.8-flash",
+    /** Tried in order when the primary model is out of daily quota or retired (each model has its own quota). */
+    fallbackModels: (process.env.GEMINI_FALLBACK_MODELS ?? "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash").split(",").map((s) => s.trim()).filter(Boolean),
     /** Parallel Gemini requests. Keep low on the free tier (requests-per-minute limits). */
     concurrency: num(process.env.GEMINI_CONCURRENCY, 3),
     /** Candidate thumbnails compared against the reference image in one request. */
-    batchSize: num(process.env.GEMINI_BATCH_SIZE, 6),
+    batchSize: num(process.env.GEMINI_BATCH_SIZE, 8),
   },
 
   tiktok: {
@@ -53,6 +55,8 @@ export const env = {
     perSourceMinimum: num(process.env.PER_SOURCE_MINIMUM, 20),
     /** Max scrape rounds per source (each round uses wider queries / deeper pages). */
     maxRounds: num(process.env.MAX_SEARCH_ROUNDS, 3),
+    /** Raw videos scraped per source per round, split across that round's terms. Scrapers bill per item. */
+    resultsPerRound: num(process.env.RESULTS_PER_ROUND, 40),
     /** Cost guard: never vision-score more than this many candidates per source per search. */
     maxVisionPerSource: num(process.env.MAX_VISION_PER_SOURCE, 90),
   },

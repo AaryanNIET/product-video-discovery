@@ -3,7 +3,7 @@ import { ProviderBatch, VideoCandidate } from "../../types";
 import { termsForRound } from "../brain/productAnalysis";
 import { pick, runActor, toIso } from "./apifyClient";
 import { mockCandidates } from "./mockData";
-import { ProviderSearchOptions, VideoProvider } from "./VideoProvider";
+import { perTermLimit, ProviderSearchOptions, VideoProvider } from "./VideoProvider";
 
 /**
  * Instagram Reels via Apify's Instagram Hashtag Scraper.
@@ -24,11 +24,10 @@ export class InstagramProvider implements VideoProvider {
     if (!terms.length) return { candidates: [], skipped: 0 };
     if (env.providerMode === "mock") return mockCandidates("instagram", terms, opts);
 
-    const perTag = Math.min(80, Math.ceil(opts.limit / terms.length) * (opts.round + 1));
     const items = await runActor(env.apify.instagramActor, {
       hashtags: terms,
       resultsType: "reels",
-      resultsLimit: perTag,
+      resultsLimit: perTermLimit(opts, terms), // per hashtag
     });
 
     const candidates: VideoCandidate[] = [];

@@ -3,7 +3,7 @@ import { ProviderBatch, VideoCandidate } from "../../types";
 import { termsForRound } from "../brain/productAnalysis";
 import { pick, runActor, toIso } from "./apifyClient";
 import { mockCandidates } from "./mockData";
-import { ProviderSearchOptions, VideoProvider } from "./VideoProvider";
+import { perTermLimit, ProviderSearchOptions, VideoProvider } from "./VideoProvider";
 
 /**
  * Optional third source: TikTok search via Apify's TikTok Scraper. It runs only
@@ -23,7 +23,8 @@ export class TikTokProvider implements VideoProvider {
 
     const items = await runActor(env.apify.tiktokActor, {
       searchQueries: terms,
-      resultsPerPage: Math.min(60, Math.ceil(opts.limit / terms.length) * (opts.round + 1)),
+      searchSection: "/video", // videos only, not profiles
+      resultsPerPage: perTermLimit(opts, terms),
       shouldDownloadVideos: false,
       shouldDownloadCovers: false,
     });

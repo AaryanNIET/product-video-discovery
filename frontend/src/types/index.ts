@@ -60,7 +60,7 @@ export interface SourceSummary {
   accepted: VideoCandidate[];
   belowThreshold: VideoCandidate[];
   previouslySeen: VideoCandidate[];
-  stats: { fetched: number; duplicates: number; previouslySeen: number; scored: number; rounds: number };
+  stats: { fetched: number; duplicates: number; previouslySeen: number; scored: number; rounds: number; estCostUsd?: number };
   queriesUsed: string[];
   error?: string;
   shortfall?: string;

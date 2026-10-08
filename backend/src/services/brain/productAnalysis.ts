@@ -46,6 +46,8 @@ export interface AnalysisResult {
   attributes: ProductAttributes;
   searchPlan: SearchPlan;
   mode: "vision" | "text" | "heuristic";
+  /** Set when Gemini is configured but the call failed (bad model, quota, outage). */
+  brainError?: string;
 }
 
 /**
@@ -91,8 +93,8 @@ export async function analyzeProduct(input: { title: string; description: string
       mode: input.image ? "vision" : "text",
     };
   } catch (err) {
-    logger.warn("Gemini product analysis failed, using heuristic analysis", { error: (err as Error).message });
-    return heuristicAnalysis(input.title, input.description);
+    logger.warn("Gemini product analysis failed", { error: (err as Error).message });
+    return { ...heuristicAnalysis(input.title, input.description), brainError: (err as Error).message };
   }
 }
 

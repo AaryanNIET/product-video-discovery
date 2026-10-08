@@ -163,6 +163,7 @@ function SourceNotice({ source: s, min, running, onRetry }: { source: SourceSumm
   return (
     <p className="text-xs text-slate-500">
       {name}: {s.accepted.length} verified · {s.stats.fetched} fetched · {s.stats.duplicates} duplicates removed · {s.stats.previouslySeen} seen before · {s.stats.scored} checked by the image brain
+      {s.stats.estCostUsd ? ` · ~US$${s.stats.estCostUsd.toFixed(2)} scraper cost` : ""}
     </p>
   );
 }

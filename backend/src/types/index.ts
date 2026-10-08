@@ -97,6 +97,8 @@ export interface SourceSummary {
     previouslySeen: number;
     scored: number;
     rounds: number;
+    /** Estimated scraper cost of this source for this search (USD). */
+    estCostUsd: number;
   };
   queriesUsed: string[];
   error?: string;

@@ -111,15 +111,16 @@ export async function fetchProductPage(rawUrl: string): Promise<PageData> {
     throw new ProductPageError(`Could not open the product page (${(err as Error).message}). Try again, or upload the product image instead.`);
   }
   const html = res.body.toString("utf8");
-  const blocked = res.status === 403 || res.status === 503 || /captcha|robot check|Type the characters you see/i.test(html.slice(0, 20000));
-  if (blocked) {
-    throw new ProductPageError(
-      `The site blocked automated access (HTTP ${res.status}). Amazon and some large retailers do this. Upload a photo of the product, or paste its name, to search anyway.`
-    );
+  const blockedMessage = `The site blocked automated access (HTTP ${res.status}). Amazon and some large retailers do this. Upload a photo of the product, or paste its name, to search anyway.`;
+  // Explicit bot walls: blocking status codes or Amazon's captcha page.
+  if ([403, 429, 503].includes(res.status) || /validateCaptcha|Type the characters you see in this image|api-services-support@amazon\.com/i.test(html)) {
+    throw new ProductPageError(blockedMessage);
   }
   if (res.status >= 400) throw new ProductPageError(`The product page returned HTTP ${res.status}.`);
 
   const data = (await tryShopify(res.url, html)) || extractFromHtml(html, res.url);
+  // Many normal stores load a reCAPTCHA script, so "captcha" alone only means blocked when no product data came through.
+  if (!data.imageUrl && /captcha|robot check|are you a human/i.test(html)) throw new ProductPageError(blockedMessage);
   if (!data.title) throw new ProductPageError("Could not find a product title on that page.");
   return data;
 }
@@ -129,6 +130,8 @@ export interface ResolvedProduct {
   /** Reference image prepared for the vision model; null when matching by description only. */
   reference: Buffer | null;
   cached: boolean;
+  /** Gemini was configured but failed during analysis. */
+  brainError?: string;
 }
 
 const memoryCache = new Map<string, ProductIdentity>();
@@ -216,11 +219,15 @@ export async function resolveProduct(
     searchPlan: analysis.searchPlan,
     analysisMode: analysis.mode,
   };
+  if (analysis.brainError) {
+    onStep("analyse_image", "error", `Image brain unavailable: ${analysis.brainError}`);
+    return { identity, reference: null, cached: false, brainError: analysis.brainError };
+  }
   onStep("analyse_image", "done", `${analysis.mode === "vision" ? "Vision" : analysis.mode === "text" ? "Text-only" : "Heuristic"} analysis`);
 
   // Heuristic results are not cached, so adding a GEMINI_API_KEY later takes effect immediately.
   if (analysis.mode !== "heuristic") await writeCache(cacheKey, identity);
-  return { identity, reference: imageBuffer ? await toVisionJpeg(imageBuffer, 640) : null, cached: false };
+  return { identity, reference: imageBuffer ? await toVisionJpeg(imageBuffer, 640) : null, cached: false, brainError: analysis.brainError };
 }
 
 export { FetchFailedError };

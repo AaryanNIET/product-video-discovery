@@ -120,7 +120,7 @@ test("shortfall message explains every stage", () => {
     accepted: [vid("1")],
     belowThreshold: [vid("2"), vid("3")],
     previouslySeen: [],
-    stats: { fetched: 50, duplicates: 7, previouslySeen: 4, scored: 39, rounds: 3 },
+    stats: { fetched: 50, duplicates: 7, previouslySeen: 4, scored: 39, rounds: 3, estCostUsd: 0.29 },
     queriesUsed: [],
   };
   const msg = explainShortfall(s);

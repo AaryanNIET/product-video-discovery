@@ -3,9 +3,14 @@ import { Platform, ProviderBatch } from "../../types";
 export interface ProviderSearchOptions {
   /** 0 = most specific terms; later rounds use wider terms and deeper pages. */
   round: number;
-  /** Rough number of raw items wanted from this round. */
+  /** Raw items wanted from this round in total (split across the terms). Scrapers bill per item. */
   limit: number;
+  /** 1 for fresh terms; 2+ when terms are reused, so the scraper paginates deeper than last time. */
+  depth: number;
 }
+
+/** Items to request per term so a round stays within its total budget. */
+export const perTermLimit = (opts: ProviderSearchOptions, terms: string[]) => Math.max(3, Math.ceil(opts.limit / terms.length) * opts.depth);
 
 /**
  * Every video source implements this one method, so sources can be swapped,
