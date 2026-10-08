@@ -1,167 +1,226 @@
-import axios from "axios";
 import * as cheerio from "cheerio";
 import { ProductIdentity } from "../../types";
 import { logger } from "../../utils/logger";
-import { withRetry } from "../../utils/retry";
-import { analyzeProductImage } from "./aiProductAnalysis";
-import { generateSearchQueries } from "../search/queryGenerator";
+import { safeFetch, UnsafeUrlError, FetchFailedError } from "../../utils/safeFetch";
+import { analyzeProduct } from "../brain/productAnalysis";
+import { downloadImage, loadReferenceImage, saveReferenceImage, sha1, toVisionJpeg } from "../media/imageStore";
+import { ProductCacheModel } from "../../models/Product";
+import { isDbReady } from "../../db/connection";
 
-const BLOCKED_HOST_PATTERNS = [
-  /^localhost$/i,
-  /^127\./,
-  /^0\.0\.0\.0$/,
-  /^10\./,
-  /^192\.168\./,
-  /^169\.254\./,
-  /^::1$/,
-];
+export class ProductPageError extends Error {
+  status = 422;
+}
 
-export class InvalidUrlError extends Error {}
+export interface PageData {
+  title: string;
+  description: string;
+  imageUrl: string | null;
+}
 
-function assertSafeUrl(rawUrl: string): URL {
-  let url: URL;
+export const isUrlInput = (s: string) => /^https?:\/\//i.test(s.trim());
+
+const strip = (s?: string | null) => (s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+
+function absolutize(src: string | undefined | null, base: string): string | null {
+  if (!src) return null;
   try {
-    url = new URL(rawUrl);
+    return new URL(src.startsWith("//") ? `https:${src}` : src, base).toString();
   } catch {
-    throw new InvalidUrlError("Could not parse URL");
+    return null;
   }
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw new InvalidUrlError("Only http/https URLs are allowed");
-  }
-  if (BLOCKED_HOST_PATTERNS.some((re) => re.test(url.hostname))) {
-    throw new InvalidUrlError("Refusing to fetch internal/private network addresses");
-  }
-  return url;
 }
 
-function isLikelyUrl(input: string): boolean {
-  return /^https?:\/\//i.test(input.trim());
-}
-
-/** Extract product info from a product page using common meta tags + JSON-LD, falling back to heuristics. */
-async function resolveFromUrl(rawUrl: string): Promise<Partial<ProductIdentity> & { sourceTitle: string }> {
-  const url = assertSafeUrl(rawUrl);
-
-  const html = await withRetry(
-    async () => {
-      const res = await axios.get(url.toString(), {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; ProductDiscoveryBot/1.0)" },
-        maxRedirects: 5,
-        validateStatus: (s) => s < 500,
-      });
-      if (res.status >= 400) throw new Error(`Page fetch failed with status ${res.status}`);
-      return res.data as string;
-    },
-    { retries: 2, timeoutMs: 10000 }
-  );
-
-  const $ = cheerio.load(html);
-
-  const ogTitle = $('meta[property="og:title"]').attr("content");
-  const ogImage = $('meta[property="og:image"]').attr("content");
-  const ogDescription = $('meta[property="og:description"]').attr("content");
-  const metaDescription = $('meta[name="description"]').attr("content");
-  const title = ogTitle || $("title").first().text() || $("h1").first().text();
-
-  // Try to find JSON-LD Product schema for richer data (brand, sku, color).
-  let jsonLdProduct: any = null;
+/** Finds a schema.org Product in any JSON-LD block, including @graph arrays. */
+function findJsonLdProduct($: cheerio.CheerioAPI): any {
+  let found: any = null;
   $('script[type="application/ld+json"]').each((_, el) => {
-    if (jsonLdProduct) return;
+    if (found) return;
     try {
       const data = JSON.parse($(el).contents().text());
-      const items = Array.isArray(data) ? data : [data];
-      const found = items.find((d) => d && (d["@type"] === "Product" || (Array.isArray(d["@type"]) && d["@type"].includes("Product"))));
-      if (found) jsonLdProduct = found;
+      const stack = Array.isArray(data) ? [...data] : [data];
+      while (stack.length && !found) {
+        const node = stack.shift();
+        if (!node || typeof node !== "object") continue;
+        const type = node["@type"];
+        if (type === "Product" || (Array.isArray(type) && type.includes("Product"))) found = node;
+        if (Array.isArray(node["@graph"])) stack.push(...node["@graph"]);
+      }
     } catch {
-      // ignore malformed JSON-LD
+      /* ignore malformed JSON-LD */
     }
   });
+  return found;
+}
 
-  const brand =
-    (typeof jsonLdProduct?.brand === "string" ? jsonLdProduct.brand : jsonLdProduct?.brand?.name) || "unknown";
-  const sku = jsonLdProduct?.sku || jsonLdProduct?.mpn || "unknown";
-  const color = jsonLdProduct?.color || "unknown";
-  const image =
-    ogImage ||
-    (Array.isArray(jsonLdProduct?.image) ? jsonLdProduct.image[0] : jsonLdProduct?.image) ||
-    null;
+/** Shopify exposes clean product JSON at /products/<handle>.js on every store. */
+async function tryShopify(pageUrl: string, html: string): Promise<PageData | null> {
+  if (!/cdn\.shopify\.com|Shopify\.theme/i.test(html)) return null;
+  const u = new URL(pageUrl);
+  const m = u.pathname.match(/(.*\/products\/[^/?#]+)/);
+  if (!m) return null;
+  try {
+    const res = await safeFetch(`${u.origin}${m[1]}.js`, { maxBytes: 2 * 1024 * 1024 });
+    if (res.status >= 400) return null;
+    const p = JSON.parse(res.body.toString("utf8"));
+    return {
+      title: [p.vendor, p.title].filter(Boolean).join(" ").trim(),
+      description: strip(p.description).slice(0, 2000),
+      imageUrl: absolutize(p.featured_image || p.images?.[0], pageUrl),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Extracts title, description and main image from a product page HTML. */
+export function extractFromHtml(html: string, pageUrl: string): PageData {
+  const $ = cheerio.load(html);
+  const ld = findJsonLdProduct($);
+  const meta = (sel: string) => $(sel).attr("content")?.trim();
+
+  // Amazon: the hi-res main image lives in data attributes, not og:image.
+  let amazonImage: string | undefined = $("#landingImage").attr("data-old-hires") || $("#imgBlkFront").attr("data-old-hires");
+  if (!amazonImage) {
+    const dyn = $("#landingImage").attr("data-a-dynamic-image") || $("#imgBlkFront").attr("data-a-dynamic-image");
+    try {
+      amazonImage = dyn ? Object.keys(JSON.parse(dyn))[0] : undefined;
+    } catch {
+      /* ignore */
+    }
+  }
+  const amazonBullets = $("#feature-bullets li").map((_, el) => $(el).text().trim()).get().join(". ");
+
+  const ldImage = Array.isArray(ld?.image) ? ld.image[0] : typeof ld?.image === "object" ? ld?.image?.url : ld?.image;
+  const ldBrand = typeof ld?.brand === "string" ? ld.brand : ld?.brand?.name;
+  const rawTitle = strip($("#productTitle").text()) || ld?.name || meta('meta[property="og:title"]') || strip($("h1").first().text()) || strip($("title").first().text());
+  const title = ldBrand && rawTitle && !rawTitle.toLowerCase().includes(String(ldBrand).toLowerCase()) ? `${ldBrand} ${rawTitle}` : rawTitle;
 
   return {
-    sourceTitle: (title || "").trim(),
-    brand,
-    productName: (title || "").trim() || "unknown",
-    sku,
-    color,
-    imageUrl: image,
-    category: jsonLdProduct?.category || "unknown",
-    visualFeatures: [],
-    negativeTerms: [],
-    searchQueries: [],
+    title: strip(title).slice(0, 200),
+    description: strip(ld?.description || amazonBullets || meta('meta[property="og:description"]') || meta('meta[name="description"]')).slice(0, 2000),
+    imageUrl: absolutize(amazonImage || ldImage || meta('meta[property="og:image"]') || meta('meta[name="twitter:image"]'), pageUrl),
   };
 }
+
+export async function fetchProductPage(rawUrl: string): Promise<PageData> {
+  let res;
+  try {
+    res = await safeFetch(rawUrl);
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) throw err;
+    throw new ProductPageError(`Could not open the product page (${(err as Error).message}). Try again, or upload the product image instead.`);
+  }
+  const html = res.body.toString("utf8");
+  const blocked = res.status === 403 || res.status === 503 || /captcha|robot check|Type the characters you see/i.test(html.slice(0, 20000));
+  if (blocked) {
+    throw new ProductPageError(
+      `The site blocked automated access (HTTP ${res.status}). Amazon and some large retailers do this. Upload a photo of the product, or paste its name, to search anyway.`
+    );
+  }
+  if (res.status >= 400) throw new ProductPageError(`The product page returned HTTP ${res.status}.`);
+
+  const data = (await tryShopify(res.url, html)) || extractFromHtml(html, res.url);
+  if (!data.title) throw new ProductPageError("Could not find a product title on that page.");
+  return data;
+}
+
+export interface ResolvedProduct {
+  identity: ProductIdentity;
+  /** Reference image prepared for the vision model; null when matching by description only. */
+  reference: Buffer | null;
+  cached: boolean;
+}
+
+const memoryCache = new Map<string, ProductIdentity>();
+
+async function readCache(key: string): Promise<ProductIdentity | null> {
+  if (memoryCache.has(key)) return memoryCache.get(key)!;
+  if (!isDbReady()) return null;
+  const doc = await ProductCacheModel.findOne({ cacheKey: key }).lean();
+  return (doc?.identity as ProductIdentity) || null;
+}
+
+async function writeCache(key: string, identity: ProductIdentity) {
+  memoryCache.set(key, identity);
+  if (memoryCache.size > 200) memoryCache.delete(memoryCache.keys().next().value!);
+  if (!isDbReady()) return;
+  await ProductCacheModel.updateOne({ cacheKey: key }, { $set: { identity } }, { upsert: true }).catch((err) =>
+    logger.warn("Could not cache product", { error: err.message })
+  );
+}
+
+export type ResolveStep = "fetch_page" | "analyse_image";
 
 /**
- * Resolve a product by free-text name. We don't have an authorized product-lookup
- * API wired in by default, so this builds a best-effort identity directly from the
- * query and marks unresolved attributes as "unknown" rather than hallucinating them.
- * Swap in a real product-search API (e.g. a retailer catalog API) here when available.
+ * Turns the search input (name, link and/or uploaded image) into a product
+ * identity: title, reference image, visual attributes and search terms.
+ * Results are cached so the same link or image is never re-fetched or re-analysed.
  */
-async function resolveFromName(name: string): Promise<Partial<ProductIdentity> & { sourceTitle: string }> {
-  return {
-    sourceTitle: name,
-    brand: "unknown",
-    productName: name,
-    sku: "unknown",
-    color: "unknown",
-    imageUrl: null,
-    category: "unknown",
-    visualFeatures: [],
-    negativeTerms: [],
-    searchQueries: [],
-  };
-}
+export async function resolveProduct(
+  input: string,
+  upload: Buffer | null,
+  onStep: (step: ResolveStep, status: "active" | "done" | "skipped" | "error", detail?: string) => void
+): Promise<ResolvedProduct> {
+  const text = input.trim();
+  const uploadHash = upload ? sha1(upload) : "";
+  const cacheKey = sha1(`${text.toLowerCase()}|${uploadHash}`);
 
-export async function resolveProduct(input: string): Promise<{ identity: ProductIdentity; sourceType: "name" | "url" }> {
-  const sourceType = isLikelyUrl(input) ? "url" : "name";
-
-  logger.info("Resolving product", { sourceType, input });
-
-  const base = sourceType === "url" ? await resolveFromUrl(input) : await resolveFromName(input);
-
-  // AI visual analysis of the reference image, if we have one.
-  let visualFeatures: string[] = [];
-  let aiBrand = base.brand;
-  let aiCategory = base.category;
-  let aiColor = base.color;
-
-  if (base.imageUrl) {
-    try {
-      const analysis = await analyzeProductImage(base.imageUrl, base.sourceTitle);
-      visualFeatures = analysis.visualFeatures;
-      aiBrand = analysis.brand !== "unknown" ? analysis.brand : base.brand;
-      aiCategory = analysis.category !== "unknown" ? analysis.category : base.category;
-      aiColor = analysis.color !== "unknown" ? analysis.color : base.color;
-    } catch (err) {
-      logger.warn("AI product image analysis failed, continuing without it", {
-        error: (err as Error).message,
-      });
+  const cached = await readCache(cacheKey);
+  if (cached) {
+    const ref = cached.imageId ? await loadReferenceImage(cached.imageId) : null;
+    if (!cached.imageId || ref) {
+      onStep("fetch_page", "done", "Loaded from cache");
+      onStep("analyse_image", "done", "Loaded from cache");
+      return { identity: cached, reference: ref ? await toVisionJpeg(ref, 640) : null, cached: true };
     }
   }
 
+  let page: PageData = { title: text, description: "", imageUrl: null };
+  const sourceType: ProductIdentity["sourceType"] = isUrlInput(text) ? "url" : text ? "name" : "image";
+
+  if (sourceType === "url") {
+    onStep("fetch_page", "active", new URL(text).hostname);
+    page = await fetchProductPage(text);
+    onStep("fetch_page", "done", page.title.slice(0, 80));
+  } else {
+    onStep("fetch_page", "skipped", sourceType === "name" ? "Product name search" : "Image-only search");
+  }
+
+  let imageBuffer: Buffer | null = upload;
+  let imageSource: ProductIdentity["imageSource"] = upload ? "upload" : null;
+  if (!imageBuffer && page.imageUrl) {
+    try {
+      imageBuffer = await downloadImage(page.imageUrl);
+      imageSource = "page";
+    } catch (err) {
+      logger.warn("Could not download product image", { url: page.imageUrl, error: (err as Error).message });
+    }
+  }
+
+  onStep("analyse_image", "active", imageBuffer ? "Reading product photo" : "No photo: analysing text only");
+  const imageId = imageBuffer ? await saveReferenceImage(imageBuffer) : null;
+  const analysisImage = imageBuffer ? await toVisionJpeg(imageBuffer, 768) : null;
+  const analysis = await analyzeProduct({ title: page.title, description: page.description, image: analysisImage });
+
+  const a = analysis.attributes;
+  const fallbackTitle = [a.brand !== "unknown" ? a.brand : "", a.productType !== "unknown" ? a.productType : ""].join(" ").trim();
   const identity: ProductIdentity = {
-    brand: aiBrand || "unknown",
-    productName: base.productName || base.sourceTitle || "unknown",
-    modelNumber: "unknown",
-    sku: base.sku || "unknown",
-    category: aiCategory || "unknown",
-    color: aiColor || "unknown",
-    imageUrl: base.imageUrl || null,
-    visualFeatures,
-    negativeTerms: [],
-    searchQueries: [],
+    title: page.title || fallbackTitle || "Uploaded product",
+    description: page.description,
+    sourceType,
+    sourceUrl: sourceType === "url" ? text : null,
+    imageSource,
+    imageId,
+    imageUrl: page.imageUrl,
+    attributes: analysis.attributes,
+    searchPlan: analysis.searchPlan,
+    analysisMode: analysis.mode,
   };
+  onStep("analyse_image", "done", `${analysis.mode === "vision" ? "Vision" : analysis.mode === "text" ? "Text-only" : "Heuristic"} analysis`);
 
-  identity.searchQueries = generateSearchQueries(identity);
-
-  return { identity, sourceType };
+  // Heuristic results are not cached, so adding a GEMINI_API_KEY later takes effect immediately.
+  if (analysis.mode !== "heuristic") await writeCache(cacheKey, identity);
+  return { identity, reference: imageBuffer ? await toVisionJpeg(imageBuffer, 640) : null, cached: false };
 }
+
+export { FetchFailedError };

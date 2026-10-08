@@ -1,31 +1,26 @@
-import { Schema, model, Document } from "mongoose";
+import { Schema, model } from "mongoose";
 import { ProductIdentity } from "../types";
 
-export interface ProductDoc extends Document, ProductIdentity {
-  sourceType: "name" | "url";
-  sourceInput: string;
+/**
+ * Cache of resolved + analysed products, keyed by normalised input (and the
+ * uploaded image's hash). Re-searching the same link or image skips the page
+ * fetch and the Gemini analysis call.
+ */
+export interface ProductCacheDoc {
+  cacheKey: string;
+  identity: ProductIdentity;
   createdAt: Date;
 }
 
-const ProductSchema = new Schema<ProductDoc>(
+const ProductCacheSchema = new Schema<ProductCacheDoc>(
   {
-    brand: { type: String, default: "unknown" },
-    productName: { type: String, required: true },
-    modelNumber: { type: String, default: "unknown" },
-    sku: { type: String, default: "unknown" },
-    category: { type: String, default: "unknown" },
-    color: { type: String, default: "unknown" },
-    imageUrl: { type: String, default: null },
-    visualFeatures: { type: [String], default: [] },
-    searchQueries: { type: [String], default: [] },
-    negativeTerms: { type: [String], default: [] },
-    sourceType: { type: String, enum: ["name", "url"], required: true },
-    sourceInput: { type: String, required: true },
+    cacheKey: { type: String, required: true, unique: true },
+    identity: { type: Schema.Types.Mixed, required: true },
   },
   { timestamps: true }
 );
 
-// Cache lookup: same source input should not be re-resolved every time.
-ProductSchema.index({ sourceInput: 1 });
+// Product pages change (price, images); re-analyse after 7 days.
+ProductCacheSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 3600 });
 
-export const ProductModel = model<ProductDoc>("Product", ProductSchema);
+export const ProductCacheModel = model<ProductCacheDoc>("ProductCache", ProductCacheSchema);

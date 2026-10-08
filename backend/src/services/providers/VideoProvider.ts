@@ -1,37 +1,19 @@
-import { NormalizedCandidate, Platform, ProviderSearchResult } from "../../types";
+import { Platform, ProviderBatch } from "../../types";
+
+export interface ProviderSearchOptions {
+  /** 0 = most specific terms; later rounds use wider terms and deeper pages. */
+  round: number;
+  /** Rough number of raw items wanted from this round. */
+  limit: number;
+}
 
 /**
- * Common interface every video source must implement. Keeping this interface
- * narrow lets InstagramProvider / MetaAdsProvider / a future TikTokProvider be
- * swapped independently (and lets a live adapter replace a mock adapter without
- * touching any calling code).
+ * Every video source implements this one method, so sources can be swapped,
+ * mocked or added (TikTok) without touching the pipeline.
  */
 export interface VideoProvider {
   readonly platform: Platform;
-  search(queries: string[], minimumResults: number): Promise<ProviderSearchResult>;
-}
-
-export function emptyResult(platform: Platform, requestedMinimum: number, error?: string): ProviderSearchResult {
-  return {
-    platform,
-    candidates: [],
-    status: error ? "failed" : "ok",
-    error,
-    requestedMinimum,
-    returned: 0,
-  };
-}
-
-export function partitionResult(
-  platform: Platform,
-  candidates: NormalizedCandidate[],
-  requestedMinimum: number
-): ProviderSearchResult {
-  return {
-    platform,
-    candidates,
-    status: candidates.length >= requestedMinimum ? "ok" : "partial",
-    requestedMinimum,
-    returned: candidates.length,
-  };
+  /** Search terms this provider wants from the brain's plan for a given round. */
+  termsFor(plan: { instagramHashtags: string[]; metaKeywords: string[]; tiktokKeywords: string[] }, round: number): string[];
+  search(terms: string[], opts: ProviderSearchOptions): Promise<ProviderBatch>;
 }

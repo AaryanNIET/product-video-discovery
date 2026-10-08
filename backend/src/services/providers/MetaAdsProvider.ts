@@ -1,90 +1,86 @@
-import axios from "axios";
 import { env } from "../../config/env";
-import { logger } from "../../utils/logger";
-import { withRetry } from "../../utils/retry";
-import { toNormalized } from "../search/normalize";
-import { emptyResult, partitionResult, VideoProvider } from "./VideoProvider";
-import { ProviderSearchResult } from "../../types";
-import { mockAds } from "./mockData";
+import { ProviderBatch, VideoCandidate } from "../../types";
+import { termsForRound } from "../brain/productAnalysis";
+import { pick, runActor, toIso } from "./apifyClient";
+import { mockCandidates } from "./mockData";
+import { ProviderSearchOptions, VideoProvider } from "./VideoProvider";
+
+/** Public Ad Library search URL for video ads matching a keyword, across all countries and ad types. */
+export function adLibrarySearchUrl(term: string, country = env.apify.adLibraryCountry): string {
+  const params = new URLSearchParams({
+    active_status: "all",
+    ad_type: "all",
+    country,
+    media_type: "video",
+    q: term,
+    search_type: "keyword_unordered",
+  });
+  return `https://www.facebook.com/ads/library/?${params.toString()}`;
+}
 
 /**
- * Meta Ad Library provider.
+ * Meta Ad Library video ads via Apify's Facebook Ads Scraper.
  *
- * LIVE MODE: The Meta Ad Library API (graph.facebook.com/.../ads_archive) IS
- * public and keyword-searchable without special partnership, but it requires
- * an access token tied to an identity-verified developer, enforces per-app
- * rate limits, and only returns ads currently or recently active (so coverage
- * for a given product can legitimately be thin). This adapter calls that
- * endpoint directly when META_AD_LIBRARY_ACCESS_TOKEN is set.
- *
- * MOCK MODE (default): deterministic mock ad candidates for local development.
+ * Why not the official Ad Library API: it only returns all ad types for ads
+ * delivered in the EU/UK (elsewhere it is limited to political/issue ads) and
+ * needs an identity-verified developer account. The public Ad Library website
+ * shows every commercial ad, and the scraper reads exactly that page.
  */
 export class MetaAdsProvider implements VideoProvider {
   readonly platform = "meta_ads" as const;
 
-  async search(queries: string[], minimumResults: number): Promise<ProviderSearchResult> {
-    if (env.providerMode === "live") {
-      return this.searchLive(queries, minimumResults);
-    }
-    return this.searchMock(queries, minimumResults);
+  termsFor(plan: { metaKeywords: string[] }, round: number): string[] {
+    return termsForRound(plan.metaKeywords, round, 3);
   }
 
-  private async searchMock(queries: string[], minimumResults: number): Promise<ProviderSearchResult> {
-    const candidates = mockAds(queries, Math.max(minimumResults, 20) * 4);
-    return partitionResult("meta_ads", candidates, minimumResults);
-  }
+  async search(terms: string[], opts: ProviderSearchOptions): Promise<ProviderBatch> {
+    if (!terms.length) return { candidates: [], skipped: 0 };
+    if (env.providerMode === "mock") return mockCandidates("meta_ads", terms, opts);
 
-  private async searchLive(queries: string[], minimumResults: number): Promise<ProviderSearchResult> {
-    if (!env.metaAds.accessToken) {
-      return emptyResult(
-        "meta_ads",
-        minimumResults,
-        "META_AD_LIBRARY_ACCESS_TOKEN not configured. See README 'Known limitations'."
-      );
-    }
+    const items = await runActor(env.apify.metaAdsActor, {
+      startUrls: terms.map((t) => ({ url: adLibrarySearchUrl(t) })),
+      resultsLimit: Math.min(200, opts.limit * (opts.round + 1)),
+      isDetailsPerAd: false,
+    });
 
-    try {
-      const all = [];
-      for (const q of queries) {
-        const batch = await withRetry(
-          async () => {
-            const res = await axios.get(
-              `https://graph.facebook.com/${env.metaAds.apiVersion}/ads_archive`,
-              {
-                params: {
-                  search_terms: q,
-                  ad_type: "ALL",
-                  ad_reached_countries: "['US']",
-                  media_type: "VIDEO",
-                  access_token: env.metaAds.accessToken,
-                },
-                timeout: 8000,
-              }
-            );
-            return res.data?.data ?? [];
-          },
-          { retries: 2, timeoutMs: 8000 }
-        );
-        all.push(
-          ...batch.map((item: any) =>
-            toNormalized({
-              platform: "meta_ads",
-              externalId: String(item.id),
-              url: item.ad_snapshot_url || `https://www.facebook.com/ads/library/?id=${item.id}`,
-              thumbnailUrl: item.image_url,
-              title: item.page_name,
-              caption: item.ad_creative_bodies?.[0],
-              creator: item.page_name,
-              metadata: item,
-              sourceQuery: q,
-            })
-          )
-        );
+    const candidates: VideoCandidate[] = [];
+    let skipped = 0;
+    for (const it of items) {
+      const id = String(pick(it, "adArchiveID", "adArchiveId", "ad_archive_id", "id") || "");
+      const snap = it.snapshot || {};
+      const videos: any[] = [
+        ...(snap.videos || []),
+        ...((snap.cards || []) as any[]).filter((c) => pick(c, "video_hd_url", "videoHdUrl", "video_sd_url", "videoSdUrl")),
+      ];
+      const video = videos[0];
+      const thumb = video && pick(video, "video_preview_image_url", "videoPreviewImageUrl", "resized_image_url");
+      const videoUrl = video && pick(video, "video_hd_url", "videoHdUrl", "video_sd_url", "videoSdUrl");
+      if (!id || (!thumb && !videoUrl)) {
+        skipped++;
+        continue;
       }
-      return partitionResult("meta_ads", all, minimumResults);
-    } catch (err) {
-      logger.error("Meta Ad Library live search failed", { error: (err as Error).message });
-      return emptyResult("meta_ads", minimumResults, (err as Error).message);
+      const body = pick(snap, "body.text", "body.markup.__html", "cards.0.body") || pick(it, "adText", "body");
+      const title = pick(snap, "title", "cards.0.title");
+      const caption = [title, body].filter((s) => s && !/\{\{.*\}\}/.test(String(s))).join(" — ");
+
+      candidates.push({
+        key: `meta_ads:${id}`,
+        platform: "meta_ads",
+        externalId: id,
+        url: `https://www.facebook.com/ads/library/?id=${id}`,
+        thumbnailUrl: thumb,
+        videoUrl,
+        caption: caption || undefined,
+        creator: pick(snap, "page_name", "pageName") || pick(it, "pageName", "page_name"),
+        postedAt: toIso(pick(it, "startDate", "start_date", "startDateFormatted")),
+        engagement: Number(pick(it, "collationCount", "collation_count") || 0),
+        groupId: pick(it, "collationID", "collationId", "collation_id") ? String(pick(it, "collationID", "collationId", "collation_id")) : undefined,
+        sourceQuery: String(pick(it, "inputUrl", "url") || "").match(/[?&]q=([^&]+)/)?.[1]
+          ? decodeURIComponent(String(pick(it, "inputUrl", "url")).match(/[?&]q=([^&]+)/)![1].replace(/\+/g, " "))
+          : terms[0],
+        raw: { isActive: pick(it, "isActive", "is_active"), linkUrl: pick(snap, "link_url", "linkUrl"), platforms: pick(it, "publisherPlatform", "publisher_platform") },
+      });
     }
+    return { candidates, skipped };
   }
 }

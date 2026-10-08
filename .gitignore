@@ -1,6 +1,14 @@
 node_modules/
 dist/
 build/
-.env
+coverage/
 *.log
 .DS_Store
+
+# Secrets: every real key lives only in local .env files
+.env
+.env.*
+!.env.example
+
+# Runtime data (reference images, cached thumbnails)
+backend/storage/
