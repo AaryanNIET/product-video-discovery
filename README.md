@@ -104,7 +104,14 @@ frontend/src/            React dashboard (components/, pages/Dashboard.tsx)
 
 **Uniqueness** (mock data, 3 identical searches in a row): 0 videos repeated between searches, 0 duplicates inside any result set.
 
-**5-product evaluation: not run yet.** It needs about $4-7 of Apify credit and more Gemini calls than the free tier allows in one day. The script is ready (`npm run evaluate` writes `docs/test-results.md`). I chose to save the remaining credit for the demo video.
+**5-product evaluation: not run yet.** To save credit, the demo-video searches are reused as evidence, and only the remaining products are run:
+
+```bash
+cd backend
+npm run evaluate -- --from-history scripts/extra-products.json
+```
+
+This writes [`docs/test-results.md`](docs/test-results.md): counts per source, examples of good and rejected matches, and the repeat-search check.
 
 ---
 

@@ -6,8 +6,13 @@
  * then repeats the first search to prove the second run returns new videos.
  * Writes docs/test-results.md (readable report) and docs/test-results.json.
  *
- *   npm run evaluate                      # default product set
- *   npm run evaluate -- products.json     # custom list: [{ "label": "...", "input": "..." }]
+ *   npm run evaluate                               # run the default product set (+ one repeat search)
+ *   npm run evaluate -- products.json              # run a custom list: [{ "label": "...", "input": "..." }]
+ *   npm run evaluate -- --from-history             # report on searches already done: no new cost
+ *   npm run evaluate -- --from-history extra.json  # reuse finished searches, run only the extra products
+ *
+ * With --from-history, inputs already searched are skipped, and two searches of
+ * the same input are used as the repeat-search (uniqueness) check.
  *
  * Requires the backend to be running (npm run dev) with APIFY_TOKEN and GEMINI_API_KEY set.
  */
@@ -98,19 +103,21 @@ function summarize(label, input, job) {
   };
 }
 
-function markdown(results, repeat, threshold) {
+function markdown(results, repeats, threshold) {
   const lines = [];
   const d = new Date().toISOString().slice(0, 16).replace("T", " ");
   lines.push(`# Test results`, "", `Generated ${d} UTC by \`npm run evaluate\`. Match threshold: **${threshold}**. Minimum per source: **20**.`, "");
   lines.push("## Summary", "", "| # | Product | Input | Status | Instagram verified | Meta verified | Time |", "|---|---|---|---|---|---|---|");
   results.forEach((r, i) => {
     const c = (k) => (r.sources[k] ? `${r.sources[k].verified}${r.sources[k].verified >= 20 ? " ✅" : " ⚠️"}` : "-");
-    lines.push(`| ${i + 1} | ${r.label} | \`${r.input.length > 50 ? r.input.slice(0, 47) + "..." : r.input}\` | ${r.status} | ${c("instagram")} | ${c("meta_ads")} | ${r.seconds ?? "-"}s |`);
+    lines.push(`| ${i + 1} | ${r.label} | \`${r.input.length > 50 ? r.input.slice(0, 47) + "..." : r.input}\` | ${r.status} | ${c("instagram")} | ${c("meta_ads")} | ${r.seconds ? `${r.seconds}s` : "-"} |`);
   });
-  if (repeat) {
-    lines.push("", "## Repeat search (uniqueness)", "");
-    lines.push(`Searched **${repeat.input}** twice in a row.`, "");
-    lines.push(`- First run: ${repeat.first} verified videos`, `- Second run: ${repeat.second} verified videos`, `- Videos returned by both runs: **${repeat.overlap}**`);
+  if (repeats.length) {
+    lines.push("", "## Repeat search (uniqueness)", "", "| Product searched twice | First run (verified) | Second run (verified) | Videos returned by both |", "|---|---|---|---|");
+    for (const r of repeats) {
+      const input = r.input.length > 50 ? r.input.slice(0, 47) + "..." : r.input;
+      lines.push(`| \`${input}\` | ${r.first} | ${r.second} | **${r.overlap}** |`);
+    }
   }
   lines.push("", "## Per product", "");
   results.forEach((r, i) => {
@@ -137,17 +144,50 @@ function markdown(results, repeat, threshold) {
   return lines.join("\n");
 }
 
+/** Finished searches from history, turned into report entries (no API cost). */
+async function reuseHistory() {
+  const { history } = await api("/history");
+  const done = history.filter((h) => ["completed", "partial", "failed"].includes(h.status)).reverse(); // oldest first
+  const out = [];
+  for (const h of done) {
+    const job = await api(`/search/${h.jobId}`);
+    const kind = /^https?:/i.test(job.input) ? "link" : job.hasUpload ? "photo" : "name";
+    const label = `${(job.product?.title || job.input || "Uploaded product").slice(0, 60)} (${kind})`;
+    out.push(summarize(label, job.input || "(photo upload)", { ...job, seconds: null }));
+  }
+  return out;
+}
+
+/** Searches of the same input: the later run should contain only new videos. */
+function repeatChecks(results) {
+  const byInput = new Map();
+  for (const r of results) if (r.acceptedKeys?.length) byInput.set(r.input, [...(byInput.get(r.input) || []), r]);
+  return [...byInput.values()]
+    .filter((runs) => runs.length >= 2)
+    .map(([a, b]) => ({ input: a.input, first: a.acceptedKeys.length, second: b.acceptedKeys.length, overlap: b.acceptedKeys.filter((k) => a.acceptedKeys.includes(k)).length }));
+}
+
 async function main() {
-  const custom = process.argv[2];
-  const products = custom ? JSON.parse(await fs.readFile(custom, "utf8")) : DEFAULT_PRODUCTS;
+  const args = process.argv.slice(2);
+  const fromHistory = args.includes("--from-history");
+  const file = args.find((a) => !a.startsWith("--"));
+  const products = file ? JSON.parse(await fs.readFile(file, "utf8")) : fromHistory ? [] : DEFAULT_PRODUCTS;
+
   const health = await api("/health");
   console.log("Backend:", health);
   if (health.providerMode !== "live" || health.scraper !== "apify" || !health.vision.startsWith("gemini")) {
     console.warn("\n⚠ Not running with live scraping + Gemini; results will not reflect real accuracy.\n");
   }
 
-  const results = [];
+  const results = fromHistory ? await reuseHistory() : [];
+  if (fromHistory) console.log(`Reused ${results.length} finished searches from history (no new cost).`);
+  const already = new Set(results.map((r) => r.input));
+
   for (const p of products) {
+    if (already.has(p.input)) {
+      console.log(`→ ${p.label}: already in history, skipped`);
+      continue;
+    }
     process.stdout.write(`→ ${p.label}: ${p.input} … `);
     try {
       const job = await runSearch(p.input);
@@ -160,21 +200,20 @@ async function main() {
     }
   }
 
-  // Uniqueness: repeat the first successful search and measure overlap.
-  let repeat = null;
+  // Uniqueness: use repeated searches already in the set; only run an extra repeat in default mode.
+  let repeats = repeatChecks(results);
   const first = results.find((r) => r.acceptedKeys?.length);
-  if (first) {
+  if (!repeats.length && first && !fromHistory) {
     process.stdout.write(`→ Repeat search: ${first.input} … `);
     const again = summarize(first.label, first.input, await runSearch(first.input));
-    const overlap = again.acceptedKeys.filter((k) => first.acceptedKeys.includes(k)).length;
-    repeat = { input: first.input, first: first.acceptedKeys.length, second: again.acceptedKeys.length, overlap, jobId: again.jobId };
-    console.log(`${again.acceptedKeys.length} verified, ${overlap} overlap`);
+    repeats = [{ input: first.input, first: first.acceptedKeys.length, second: again.acceptedKeys.length, overlap: again.acceptedKeys.filter((k) => first.acceptedKeys.includes(k)).length }];
+    console.log(`${again.acceptedKeys.length} verified, ${repeats[0].overlap} overlap`);
   }
 
   const outDir = path.join(ROOT, "docs");
   await fs.mkdir(outDir, { recursive: true });
-  await fs.writeFile(path.join(outDir, "test-results.json"), JSON.stringify({ health, results, repeat }, null, 2));
-  await fs.writeFile(path.join(outDir, "test-results.md"), markdown(results, repeat, health.matchThreshold));
+  await fs.writeFile(path.join(outDir, "test-results.json"), JSON.stringify({ health, results, repeats }, null, 2));
+  await fs.writeFile(path.join(outDir, "test-results.md"), markdown(results, repeats, health.matchThreshold));
   console.log(`\nWrote ${path.join(outDir, "test-results.md")}`);
 }
 
