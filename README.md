@@ -72,7 +72,7 @@ frontend/src/            React dashboard (components/, pages/Dashboard.tsx)
 
 **4. De-duplicate.** Repeats are removed by video ID, video file, Meta "same ad creative" ID, caption + creator, and a **perceptual hash** of the thumbnail (catches re-uploads). Videos shown in **any earlier search** are skipped, so every search shows new videos. A "Show previously seen" toggle brings them back.
 
-**5. Brain: score.** Each thumbnail is compared with the product photo (8 per Gemini call) using a fixed rubric:
+**5. Brain: score.** Each thumbnail is compared with the product photo (12 per Gemini call) using a fixed rubric:
 
 | Score | Meaning |
 |---|---|
@@ -139,7 +139,7 @@ A search runs 1-3 rounds per source, depending on how quickly it finds 20 verifi
 - **Meta is the expensive source.** It's about two-thirds of the cost: ads cost twice as much per item, and the same ad often appears under many IDs.
 - **Strict matching costs more.** Rejecting other colourways and editions means more rounds to reach 20 verified videos.
 - **Apify's free $5/month covers about 5 searches.** Real use needs a paid plan.
-- **Gemini:** a search uses about 15-25 calls (1 photo analysis, plus 1 call per 8 thumbnails). The free tier allows ~20 calls per day per model, so with the 4-model fallback that's only a few searches a day. We didn't measure paid Gemini costs because we stayed on the free tier.
+- **Gemini:** a search uses about 10-12 calls (1 photo analysis, plus 1 call per 12 thumbnails, at most 60 thumbnails per source). The free tier allows ~20 calls per day per model and **resets at midnight US Pacific time** (12:30 PM in India), so with the 4-model fallback that's about 6 searches a day. We didn't measure paid Gemini costs because we stayed on the free tier.
 
 **How the app keeps costs down:** a fixed budget per round (`RESULTS_PER_ROUND`), no scraping when the brain is down, stopping when a round brings in fewer than 5 new videos, cached product analysis, and an estimated cost shown for each source in the dashboard.
 
@@ -151,7 +151,7 @@ A search runs 1-3 rounds per source, depending on how quickly it finds 20 verifi
 |---|---|
 | **Official APIs weren't usable.** Instagram has no keyword search for reels; our Meta app was the wrong type to get a user token; the official Ad Library API only returns product ads shown in the EU/UK. | Switched to **Apify** scrapers, which read the public Instagram and Ad Library pages. Each source sits behind one small interface, so it can be swapped later. |
 | **Gemini 2.5 Flash is retired for new keys**, even though it still appears in the model list. | Default to **Gemini 3.8 Flash**, with an automatic **fallback chain** (3.7 → 3.6 → 3.5) when a model is retired, overloaded or out of quota. |
-| **The Gemini free tier allows about 20 requests per day per model.** | Batch **8 thumbnails per call**; fall back to other models (each has its own quota). |
+| **The Gemini free tier allows about 20 requests per day per model**, and quota ran out *mid-search* during a demo attempt; the remaining videos were then scored from captions and still counted as verified. | Batch **12 thumbnails per call** and cap checks at 60 per source; fall back to other models (each has its own quota); and a caption-only score **never counts as verified** when the image check fails. |
 | **The first live search cost ~$1.65.** Meta's result limit applies *per keyword*, not per run, and the search kept going after Gemini had failed. | Fixed per-round budgets (`RESULTS_PER_ROUND`); **never scrape when the brain is down**; stop when a round brings in fewer than 5 new videos; show the estimated cost per source. |
 | **Captions can't be trusted.** Posts of other colourways and editions all name the product. | The brain judges the **image first**. A caption can't lift a visually different product above 39. |
 | **Shopify pages were flagged as "blocked by captcha"** because they load a reCAPTCHA script. | Only real bot walls count: 403/503 responses, Amazon's captcha page, or "captcha" with no product data. |

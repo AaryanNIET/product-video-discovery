@@ -193,7 +193,10 @@ async function collectSource(job: Job, platform: Platform, identity: ProductIden
     summary.stats.scored += unique.length;
     for (const c of unique) {
       c.match = scores.get(c.key);
-      if ((c.match?.score ?? 0) >= env.matching.threshold) summary.accepted.push(c);
+      // With a vision model configured, a caption-only score means the image check failed (quota, outage):
+      // such a video was never visually verified, so it must not count toward the 20.
+      const unverified = isGeminiConfigured() && c.match?.method === "text-fallback";
+      if (!unverified && (c.match?.score ?? 0) >= env.matching.threshold) summary.accepted.push(c);
       else summary.belowThreshold.push(c);
     }
     const visionDown = isGeminiConfigured() && unique.length > 0 && unique.every((c) => c.match?.method === "text-fallback");
