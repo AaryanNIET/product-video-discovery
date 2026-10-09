@@ -19,6 +19,26 @@ export interface PageData {
 
 export const isUrlInput = (s: string) => /^https?:\/\//i.test(s.trim());
 
+/**
+ * Best-effort product name from a product URL's path, used when the page itself
+ * is blocked: ".../t/air-jordan-1-mid-shoes-SQf7DM" -> "Air Jordan 1 Mid Shoes".
+ */
+export function titleFromUrl(raw: string): string {
+  try {
+    const segments = new URL(raw).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    const slug = [...segments].reverse().find((s) => /[a-z]{3,}.*-[a-z0-9]/i.test(s)) || "";
+    return slug
+      .replace(/\.(html?|aspx?|php)$/i, "")
+      .split(/[-_]+/)
+      .filter((w) => !/^(?=.*\d)(?=.*[A-Z])[A-Za-z0-9]{5,}$/.test(w) && !/^\d{5,}$/.test(w)) // drop SKU-like codes
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ")
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
 const strip = (s?: string | null) => (s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
 function absolutize(src: string | undefined | null, base: string): string | null {
@@ -183,8 +203,16 @@ export async function resolveProduct(
 
   if (sourceType === "url") {
     onStep("fetch_page", "active", new URL(text).hostname);
-    page = await fetchProductPage(text);
-    onStep("fetch_page", "done", page.title.slice(0, 80));
+    try {
+      page = await fetchProductPage(text);
+      onStep("fetch_page", "done", page.title.slice(0, 80));
+    } catch (err) {
+      // A blocked page is not fatal when the user also uploaded the product photo:
+      // the photo is the reference, and the link still tells us the product name.
+      if (!upload || !(err instanceof ProductPageError)) throw err;
+      page = { title: titleFromUrl(text), description: "", imageUrl: null };
+      onStep("fetch_page", "done", `Page blocked, using your photo${page.title ? ` (“${page.title}”)` : ""}`);
+    }
   } else {
     onStep("fetch_page", "skipped", sourceType === "name" ? "Product name search" : "Image-only search");
   }

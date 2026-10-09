@@ -1,5 +1,5 @@
 import { assertPublicUrl, isPrivateAddress } from "../utils/safeFetch";
-import { extractFromHtml } from "../services/product/productResolver";
+import { extractFromHtml, titleFromUrl } from "../services/product/productResolver";
 
 describe("SSRF guard", () => {
   test.each(["127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"])(
@@ -38,6 +38,13 @@ describe("product page extraction", () => {
     expect(p.imageUrl).toBe("https://m.media-amazon.com/images/I/abc.jpg");
     expect(p.description).toContain("Mesh upper");
   });
+
+  test.each([
+    ["https://www.nike.com/t/air-jordan-1-mid-shoes-SQf7DM", "Air Jordan 1 Mid Shoes"],
+    ["https://www.stanley1913.com/products/adventure-quencher-travel-tumbler-40-oz", "Adventure Quencher Travel Tumbler 40 Oz"],
+    ["https://shop.example.com/p/oversized-graphic-tee.html?variant=123", "Oversized Graphic Tee"],
+    ["https://www.amazon.com/CeraVe-Moisturizing-Cream/dp/B00TTD9BRC", "CeraVe Moisturizing Cream"],
+  ])("derives a product name from the link %s", (url, title) => expect(titleFromUrl(url)).toBe(title));
 
   test("falls back to Open Graph tags", () => {
     const html = `<meta property="og:title" content="Graphic Tee"><meta property="og:image" content="//cdn.example.com/tee.png"><meta name="description" content="Oversized fit">`;
